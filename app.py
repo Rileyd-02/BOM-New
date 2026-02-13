@@ -4,7 +4,7 @@ from io import BytesIO
 
 st.set_page_config(page_title="SAP vs PLM Consumption Comparator", layout="wide")
 
-st.title("SAP vs PLM Consumption Comparison Tool")
+st.title("SAP vs PLM Size-wise Consumption Comparison Tool")
 
 sap_file = st.file_uploader("Upload SAP File", type=["xlsx"])
 plm_file = st.file_uploader("Upload PLM File", type=["xlsx"])
@@ -29,24 +29,27 @@ if sap_file and plm_file:
     sap_df.columns = sap_df.columns.str.strip()
     plm_df.columns = plm_df.columns.str.strip()
 
-    # Rename columns
+    # -------------------------
+    # Rename Columns Properly
+    # -------------------------
+
     sap_df = sap_df.rename(columns={
-        "Material": "Material",
-        "Vendor Ref": "Vendor Ref",
+        "Vendor Reference": "Vendor Ref",
         "Consumption": "SAP_Consumption",
+        "Component": "Material",
         "Garment Size": "Garment Size"
     })
 
     plm_df = plm_df.rename(columns={
-        "Material": "Material",
-        "Vendor Ref": "Vendor Ref",
-        "Consumption": "PLM_Consumption",
-        "Garment Size": "Garment Size"
+        "Consumption": "PLM_Consumption"
     })
 
-    # Validate required columns
+    # -------------------------
+    # Validate Required Columns
+    # -------------------------
+
     required_sap_cols = ["Material", "Vendor Ref", "SAP_Consumption"]
-    required_plm_cols = ["Material", "Vendor Ref", "PLM_Consumption"]
+    required_plm_cols = ["Material", "Vendor Ref", "PLM_Consumption", "Garment Size"]
 
     for col in required_sap_cols:
         if col not in sap_df.columns:
@@ -58,17 +61,38 @@ if sap_file and plm_file:
             st.error(f"Missing column in PLM file: {col}")
             st.stop()
 
-    # Convert to numeric (decimal safe)
-    sap_df["SAP_Consumption"] = pd.to_numeric(sap_df["SAP_Consumption"], errors="coerce").fillna(0.0)
-    plm_df["PLM_Consumption"] = pd.to_numeric(plm_df["PLM_Consumption"], errors="coerce").fillna(0.0)
+    # -------------------------
+    # Ensure Size Column Exists in SAP
+    # -------------------------
+
+    if "Garment Size" not in sap_df.columns:
+        st.warning("Garment Size not found in SAP file. Size-wise comparison may not work properly.")
 
     # -------------------------
-    # Merge SAP + PLM
+    # Convert to Decimal
     # -------------------------
+
+    sap_df["SAP_Consumption"] = pd.to_numeric(
+        sap_df["SAP_Consumption"], errors="coerce"
+    ).fillna(0.0)
+
+    plm_df["PLM_Consumption"] = pd.to_numeric(
+        plm_df["PLM_Consumption"], errors="coerce"
+    ).fillna(0.0)
+
+    # -------------------------
+    # Merge Size-wise
+    # -------------------------
+
+    merge_keys = ["Material", "Vendor Ref"]
+
+    if "Garment Size" in sap_df.columns:
+        merge_keys.append("Garment Size")
+
     merged_df = pd.merge(
         sap_df,
         plm_df,
-        on=["Material", "Vendor Ref"],
+        on=merge_keys,
         how="outer"
     )
 
@@ -78,11 +102,11 @@ if sap_file and plm_file:
     # -------------------------
     # Calculate Difference
     # -------------------------
+
     merged_df["Consumption_Difference"] = (
         merged_df["SAP_Consumption"] - merged_df["PLM_Consumption"]
     )
 
-    # % difference based on PLM
     merged_df["Consumption_Diff_%"] = merged_df.apply(
         lambda x: ((x["SAP_Consumption"] - x["PLM_Consumption"]) / x["PLM_Consumption"]) * 100
         if x["PLM_Consumption"] != 0
@@ -93,6 +117,7 @@ if sap_file and plm_file:
     # -------------------------
     # Tolerance Logic
     # -------------------------
+
     tolerance = tolerance_percent / 100
 
     def compare_consumption(row):
@@ -117,15 +142,16 @@ if sap_file and plm_file:
 
     merged_df["Consumption_Status"] = merged_df.apply(compare_consumption, axis=1)
 
-    # Round for display
+    # Round for display only
     merged_df["SAP_Consumption"] = merged_df["SAP_Consumption"].round(4)
     merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].round(4)
     merged_df["Consumption_Difference"] = merged_df["Consumption_Difference"].round(4)
     merged_df["Consumption_Diff_%"] = merged_df["Consumption_Diff_%"].round(2)
 
     # -------------------------
-    # Filter by Status
+    # Status Filter
     # -------------------------
+
     status_filter = st.selectbox(
         "Filter by Status",
         ["All"] + list(merged_df["Consumption_Status"].unique())
@@ -136,8 +162,11 @@ if sap_file and plm_file:
     else:
         final_df = merged_df
 
-    # Select output columns
-    final_df = final_df[[
+    # -------------------------
+    # Output Columns
+    # -------------------------
+
+    display_cols = [
         "Material",
         "Vendor Ref",
         "Garment Size",
@@ -146,13 +175,18 @@ if sap_file and plm_file:
         "Consumption_Difference",
         "Consumption_Diff_%",
         "Consumption_Status"
-    ]]
+    ]
+
+    display_cols = [col for col in display_cols if col in final_df.columns]
+
+    final_df = final_df[display_cols]
 
     st.dataframe(final_df, use_container_width=True)
 
     # -------------------------
     # Download Excel
     # -------------------------
+
     def to_excel(df):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -162,6 +196,6 @@ if sap_file and plm_file:
     st.download_button(
         label="Download Comparison Report",
         data=to_excel(final_df),
-        file_name="SAP_vs_PLM_Comparison.xlsx",
+        file_name="SAP_vs_PLM_Sizewise_Comparison.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
