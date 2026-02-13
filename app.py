@@ -1,17 +1,10 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from io import BytesIO
 
 st.set_page_config(page_title="SAP vs PLM Consumption Comparator", layout="wide")
 
 st.title("SAP vs PLM Consumption Comparison Tool")
-
-st.markdown("Upload SAP and PLM files to compare consumption with decimal precision.")
-
-# -------------------------
-# File Upload
-# -------------------------
 
 sap_file = st.file_uploader("Upload SAP File", type=["xlsx"])
 plm_file = st.file_uploader("Upload PLM File", type=["xlsx"])
@@ -29,51 +22,49 @@ if sap_file and plm_file:
     # -------------------------
     # Load Files
     # -------------------------
-
     sap_df = pd.read_excel(sap_file)
     plm_df = pd.read_excel(plm_file)
 
-    # -------------------------
-    # Rename Columns (Adjust if needed)
-    # -------------------------
+    # Clean column names
+    sap_df.columns = sap_df.columns.str.strip()
+    plm_df.columns = plm_df.columns.str.strip()
 
+    # Rename columns
     sap_df = sap_df.rename(columns={
-        "Component": "Material",
-        "Component Qty": "SAP_Component_Qty",
-        "Base Qty": "Base_Qty",
-        "Vendor Ref": "Vendor Ref"
+        "Material": "Material",
+        "Vendor Ref": "Vendor Ref",
+        "Consumption": "SAP_Consumption",
+        "Garment Size": "Garment Size"
     })
 
     plm_df = plm_df.rename(columns={
         "Material": "Material",
-        "Consumption": "PLM_Consumption",
         "Vendor Ref": "Vendor Ref",
+        "Consumption": "PLM_Consumption",
         "Garment Size": "Garment Size"
     })
 
-    # -------------------------
-    # Convert to Decimal Safe Numeric
-    # -------------------------
+    # Validate required columns
+    required_sap_cols = ["Material", "Vendor Ref", "SAP_Consumption"]
+    required_plm_cols = ["Material", "Vendor Ref", "PLM_Consumption"]
 
-    sap_df["SAP_Component_Qty"] = pd.to_numeric(sap_df["SAP_Component_Qty"], errors="coerce")
-    sap_df["Base_Qty"] = pd.to_numeric(sap_df["Base_Qty"], errors="coerce")
-    plm_df["PLM_Consumption"] = pd.to_numeric(plm_df["PLM_Consumption"], errors="coerce")
+    for col in required_sap_cols:
+        if col not in sap_df.columns:
+            st.error(f"Missing column in SAP file: {col}")
+            st.stop()
 
-    # -------------------------
-    # Calculate SAP Consumption
-    # -------------------------
+    for col in required_plm_cols:
+        if col not in plm_df.columns:
+            st.error(f"Missing column in PLM file: {col}")
+            st.stop()
 
-    sap_df["SAP_Consumption"] = sap_df.apply(
-        lambda x: x["SAP_Component_Qty"] / x["Base_Qty"]
-        if pd.notna(x["Base_Qty"]) and x["Base_Qty"] != 0
-        else 0.0,
-        axis=1
-    )
+    # Convert to numeric (decimal safe)
+    sap_df["SAP_Consumption"] = pd.to_numeric(sap_df["SAP_Consumption"], errors="coerce").fillna(0.0)
+    plm_df["PLM_Consumption"] = pd.to_numeric(plm_df["PLM_Consumption"], errors="coerce").fillna(0.0)
 
     # -------------------------
     # Merge SAP + PLM
     # -------------------------
-
     merged_df = pd.merge(
         sap_df,
         plm_df,
@@ -87,12 +78,11 @@ if sap_file and plm_file:
     # -------------------------
     # Calculate Difference
     # -------------------------
-
     merged_df["Consumption_Difference"] = (
         merged_df["SAP_Consumption"] - merged_df["PLM_Consumption"]
     )
 
-    # Percentage difference (based on PLM)
+    # % difference based on PLM
     merged_df["Consumption_Diff_%"] = merged_df.apply(
         lambda x: ((x["SAP_Consumption"] - x["PLM_Consumption"]) / x["PLM_Consumption"]) * 100
         if x["PLM_Consumption"] != 0
@@ -103,7 +93,6 @@ if sap_file and plm_file:
     # -------------------------
     # Tolerance Logic
     # -------------------------
-
     tolerance = tolerance_percent / 100
 
     def compare_consumption(row):
@@ -128,34 +117,27 @@ if sap_file and plm_file:
 
     merged_df["Consumption_Status"] = merged_df.apply(compare_consumption, axis=1)
 
-    # -------------------------
-    # Round for Display Only
-    # -------------------------
-
+    # Round for display
     merged_df["SAP_Consumption"] = merged_df["SAP_Consumption"].round(4)
     merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].round(4)
     merged_df["Consumption_Difference"] = merged_df["Consumption_Difference"].round(4)
     merged_df["Consumption_Diff_%"] = merged_df["Consumption_Diff_%"].round(2)
 
     # -------------------------
-    # Filter Option
+    # Filter by Status
     # -------------------------
-
     status_filter = st.selectbox(
         "Filter by Status",
         ["All"] + list(merged_df["Consumption_Status"].unique())
     )
 
     if status_filter != "All":
-        filtered_df = merged_df[merged_df["Consumption_Status"] == status_filter]
+        final_df = merged_df[merged_df["Consumption_Status"] == status_filter]
     else:
-        filtered_df = merged_df
+        final_df = merged_df
 
-    # -------------------------
-    # Select Output Columns
-    # -------------------------
-
-    final_df = filtered_df[[
+    # Select output columns
+    final_df = final_df[[
         "Material",
         "Vendor Ref",
         "Garment Size",
@@ -171,7 +153,6 @@ if sap_file and plm_file:
     # -------------------------
     # Download Excel
     # -------------------------
-
     def to_excel(df):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
