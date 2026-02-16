@@ -15,7 +15,7 @@ This tool compares:
 
 - Material + Color match  
 - Vendor Reference match  
-- Normalized SAP vs PLM consumption  
+- Normalized SAP vs PLM consumption (decimal-safe)  
 - Tolerance-based consumption differences  
 - Fuzzy similarity (Vendor & Color)  
 """)
@@ -28,6 +28,9 @@ plm_file = st.file_uploader("📤 Upload PLM Excel File", type=["xlsx"])
 
 if sap_file and plm_file:
     try:
+        # ------------------------
+        # Read Files
+        # ------------------------
         sap_df = pd.read_excel(sap_file)
         plm_df = pd.read_excel(plm_file)
 
@@ -37,20 +40,35 @@ if sap_file and plm_file:
         # ------------------------
         # Rename Columns
         # ------------------------
-        sap_df.rename(columns={
+        sap_df = sap_df.rename(columns={
             "Material": "Material",
             "FG Color Description": "Color",
             "Vendor Reference": "Vendor Reference_SAP",
             "Comp.Qty.": "SAP_Component_Qty",
             "Base quantity": "Base_Qty"
-        }, inplace=True)
+        })
 
-        plm_df.rename(columns={
+        plm_df = plm_df.rename(columns={
             "Material": "Material",
             "Color Name": "Color",
             "Vendor Ref": "Vendor Reference_PLM",
             "Consumption": "PLM_Consumption"
-        }, inplace=True)
+        })
+
+        # ------------------------
+        # Force Numeric (Decimal Safe)
+        # ------------------------
+        sap_df["SAP_Component_Qty"] = pd.to_numeric(
+            sap_df.get("SAP_Component_Qty"), errors="coerce"
+        )
+
+        sap_df["Base_Qty"] = pd.to_numeric(
+            sap_df.get("Base_Qty"), errors="coerce"
+        )
+
+        plm_df["PLM_Consumption"] = pd.to_numeric(
+            plm_df.get("PLM_Consumption"), errors="coerce"
+        )
 
         # ------------------------
         # Merge SAP & PLM
@@ -63,7 +81,7 @@ if sap_file and plm_file:
             suffixes=("_SAP", "_PLM")
         )
 
-        merged_df["Material_Match"] = merged_df["PLM_Consumption"].apply(
+        merged_df["Material_Match"] = merged_df["Vendor Reference_PLM"].apply(
             lambda x: "Matched in PLM" if pd.notna(x) else "Missing in PLM"
         )
 
@@ -85,15 +103,18 @@ if sap_file and plm_file:
         merged_df["VendorRef_Status"] = merged_df.apply(check_vendor_ref, axis=1)
 
         # ------------------------
-        # SAP Consumption Normalization
+        # SAP Consumption Normalization (Decimal Safe)
         # ------------------------
-        merged_df["SAP_Consumption"] = merged_df.apply(
-            lambda x: round(x["SAP_Component_Qty"] / x["Base_Qty"], 5)
-            if pd.notna(x["Base_Qty"]) and x["Base_Qty"] != 0 else 0,
-            axis=1
-        )
+        def normalize_sap(row):
+            qty = row["SAP_Component_Qty"]
+            base = row["Base_Qty"]
 
-        merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].fillna(0).round(5)
+            if pd.isna(qty) or pd.isna(base) or base == 0:
+                return 0.0
+            return qty / base
+
+        merged_df["SAP_Consumption"] = merged_df.apply(normalize_sap, axis=1)
+        merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].fillna(0.0)
 
         # ------------------------
         # Consumption Comparison with Tolerance
@@ -104,7 +125,7 @@ if sap_file and plm_file:
             sap = row["SAP_Consumption"]
             plm = row["PLM_Consumption"]
 
-            if plm == 0 and sap == 0:
+            if sap == 0 and plm == 0:
                 return "OK"
             if plm == 0 and sap != 0:
                 return "PLM Missing"
@@ -140,17 +161,20 @@ if sap_file and plm_file:
             )
 
         merged_df["Vendor_Similarity"] = merged_df.apply(
-            lambda x: smart_similarity(x.get("Vendor Reference_SAP", ""), x.get("Vendor Reference_PLM", "")),
+            lambda x: smart_similarity(
+                x.get("Vendor Reference_SAP", ""),
+                x.get("Vendor Reference_PLM", "")
+            ),
             axis=1
         )
 
         merged_df["Color_Similarity"] = merged_df.apply(
-            lambda x: smart_similarity(x.get("Color_SAP", ""), x.get("Color_PLM", "")),
+            lambda x: smart_similarity(x.get("Color", ""), x.get("Color", "")),
             axis=1
         )
 
         # ------------------------
-        # FILTER OPTION
+        # Filter Option
         # ------------------------
         st.subheader("🔎 Filter Results")
         show_mismatch_only = st.checkbox("Show only mismatches")
@@ -168,11 +192,18 @@ if sap_file and plm_file:
         # Summary Metrics
         # ------------------------
         summary_df = merged_df.drop_duplicates(subset=["Material", "Color"])
+
         st.subheader("📈 Summary")
         c1, c2, c3 = st.columns(3)
         c1.metric("Total FG Materials", len(summary_df))
-        c2.metric("Within Tolerance", (summary_df["Consumption_Status"] == "Within Tolerance").sum())
-        c3.metric("Mismatches", (summary_df["Consumption_Status"] != "Within Tolerance").sum())
+        c2.metric(
+            "Within Tolerance",
+            (summary_df["Consumption_Status"] == "Within Tolerance").sum()
+        )
+        c3.metric(
+            "Mismatches",
+            (summary_df["Consumption_Status"] != "Within Tolerance").sum()
+        )
 
         # ------------------------
         # Excel Export with Colors
@@ -186,16 +217,22 @@ if sap_file and plm_file:
             worksheet = writer.sheets["Comparison_Report"]
             status_col_idx = merged_df.columns.get_loc("Consumption_Status")
 
-            format_red = workbook.add_format({'bg_color': '#FFC7CE'})
-            format_green = workbook.add_format({'bg_color': '#C6EFCE'})
-            format_orange = workbook.add_format({'bg_color': '#FFD580'})
+            format_red = workbook.add_format({"bg_color": "#FFC7CE"})
+            format_green = workbook.add_format({"bg_color": "#C6EFCE"})
+            format_orange = workbook.add_format({"bg_color": "#FFD580"})
 
-            worksheet.conditional_format(1, status_col_idx, len(merged_df), status_col_idx,
-                {'type': 'text', 'criteria': 'containing', 'value': 'SAP Higher', 'format': format_red})
-            worksheet.conditional_format(1, status_col_idx, len(merged_df), status_col_idx,
-                {'type': 'text', 'criteria': 'containing', 'value': 'PLM Higher', 'format': format_orange})
-            worksheet.conditional_format(1, status_col_idx, len(merged_df), status_col_idx,
-                {'type': 'text', 'criteria': 'containing', 'value': 'Within Tolerance', 'format': format_green})
+            worksheet.conditional_format(
+                1, status_col_idx, len(merged_df), status_col_idx,
+                {"type": "text", "criteria": "containing", "value": "SAP Higher", "format": format_red}
+            )
+            worksheet.conditional_format(
+                1, status_col_idx, len(merged_df), status_col_idx,
+                {"type": "text", "criteria": "containing", "value": "PLM Higher", "format": format_orange}
+            )
+            worksheet.conditional_format(
+                1, status_col_idx, len(merged_df), status_col_idx,
+                {"type": "text", "criteria": "containing", "value": "Within Tolerance", "format": format_green}
+            )
 
         output.seek(0)
 
@@ -218,6 +255,7 @@ if sap_file and plm_file:
             "Vendor_Similarity", "Color_Similarity",
             "Material_Match"
         ]
+
         available_cols = [c for c in preview_cols if c in filtered_df.columns]
         st.dataframe(filtered_df[available_cols].head(200))
 
