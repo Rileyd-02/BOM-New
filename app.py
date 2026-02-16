@@ -1,201 +1,228 @@
 import streamlit as st
 import pandas as pd
+from thefuzz import fuzz
 from io import BytesIO
 
-st.set_page_config(page_title="SAP vs PLM Consumption Comparator", layout="wide")
+# ------------------------
+# Page Setup
+# ------------------------
+st.set_page_config(page_title="SAP vs PLM Comparison", layout="wide")
+st.title("📊 SAP vs PLM Validation Tool")
 
-st.title("SAP vs PLM Size-wise Consumption Comparison Tool")
+st.write("""
+Upload your **SAP** and **PLM** files.  
+This tool compares:
 
-sap_file = st.file_uploader("Upload SAP File", type=["xlsx"])
-plm_file = st.file_uploader("Upload PLM File", type=["xlsx"])
+- Material + Color match  
+- Vendor Reference match  
+- Normalized SAP vs PLM consumption  
+- Tolerance-based consumption differences  
+- Fuzzy similarity (Vendor & Color)  
+""")
 
-tolerance_percent = st.number_input(
-    "Tolerance (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=5.0,
-    step=0.1
-)
+# ------------------------
+# File Upload
+# ------------------------
+sap_file = st.file_uploader("📤 Upload SAP Excel File", type=["xlsx"])
+plm_file = st.file_uploader("📤 Upload PLM Excel File", type=["xlsx"])
 
 if sap_file and plm_file:
+    try:
+        sap_df = pd.read_excel(sap_file)
+        plm_df = pd.read_excel(plm_file)
 
-    # -------------------------
-    # Load Files
-    # -------------------------
-    sap_df = pd.read_excel(sap_file)
-    plm_df = pd.read_excel(plm_file)
+        sap_df.columns = sap_df.columns.str.strip()
+        plm_df.columns = plm_df.columns.str.strip()
 
-    # Clean column names
-    sap_df.columns = sap_df.columns.str.strip()
-    plm_df.columns = plm_df.columns.str.strip()
+        # ------------------------
+        # Rename Columns
+        # ------------------------
+        sap_df.rename(columns={
+            "Material": "Material",
+            "FG Color Description": "Color",
+            "Vendor Reference": "Vendor Reference_SAP",
+            "Comp.Qty.": "SAP_Component_Qty",
+            "Base quantity": "Base_Qty"
+        }, inplace=True)
 
-    # -------------------------
-    # Rename Columns Properly
-    # -------------------------
+        plm_df.rename(columns={
+            "Material": "Material",
+            "Color Name": "Color",
+            "Vendor Ref": "Vendor Reference_PLM",
+            "Consumption": "PLM_Consumption"
+        }, inplace=True)
 
-    sap_df = sap_df.rename(columns={
-        "Vendor Reference": "Vendor Ref",
-        "Consumption": "SAP_Consumption",
-        "Component": "Material",
-        "Garment Size": "Garment Size"
-    })
+        # ------------------------
+        # Merge SAP & PLM
+        # ------------------------
+        merged_df = pd.merge(
+            sap_df,
+            plm_df,
+            on=["Material", "Color"],
+            how="left",
+            suffixes=("_SAP", "_PLM")
+        )
 
-    plm_df = plm_df.rename(columns={
-        "Consumption": "PLM_Consumption"
-    })
+        merged_df["Material_Match"] = merged_df["PLM_Consumption"].apply(
+            lambda x: "Matched in PLM" if pd.notna(x) else "Missing in PLM"
+        )
 
-    # -------------------------
-    # Validate Required Columns
-    # -------------------------
+        # ------------------------
+        # Vendor Reference Check
+        # ------------------------
+        def check_vendor_ref(row):
+            sap_ref = str(row.get("Vendor Reference_SAP", "")).strip()
+            plm_ref = str(row.get("Vendor Reference_PLM", "")).strip()
 
-    required_sap_cols = ["Material", "Vendor Ref", "SAP_Consumption"]
-    required_plm_cols = ["Material", "Vendor Ref", "PLM_Consumption", "Garment Size"]
+            if not plm_ref:
+                return "No Vendor Ref in PLM"
+            if sap_ref == plm_ref:
+                return "Exact Match"
+            if sap_ref in plm_ref or plm_ref in sap_ref:
+                return "Partial Match"
+            return "Mismatch"
 
-    for col in required_sap_cols:
-        if col not in sap_df.columns:
-            st.error(f"Missing column in SAP file: {col}")
-            st.stop()
+        merged_df["VendorRef_Status"] = merged_df.apply(check_vendor_ref, axis=1)
 
-    for col in required_plm_cols:
-        if col not in plm_df.columns:
-            st.error(f"Missing column in PLM file: {col}")
-            st.stop()
+        # ------------------------
+        # SAP Consumption Normalization
+        # ------------------------
+        merged_df["SAP_Consumption"] = merged_df.apply(
+            lambda x: round(x["SAP_Component_Qty"] / x["Base_Qty"], 5)
+            if pd.notna(x["Base_Qty"]) and x["Base_Qty"] != 0 else 0,
+            axis=1
+        )
 
-    # -------------------------
-    # Ensure Size Column Exists in SAP
-    # -------------------------
+        merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].fillna(0).round(5)
 
-    if "Garment Size" not in sap_df.columns:
-        st.warning("Garment Size not found in SAP file. Size-wise comparison may not work properly.")
+        # ------------------------
+        # Consumption Comparison with Tolerance
+        # ------------------------
+        TOLERANCE = 0.05  # 5%
 
-    # -------------------------
-    # Convert to Decimal
-    # -------------------------
+        def compare_consumption(row):
+            sap = row["SAP_Consumption"]
+            plm = row["PLM_Consumption"]
 
-    sap_df["SAP_Consumption"] = pd.to_numeric(
-        sap_df["SAP_Consumption"], errors="coerce"
-    ).fillna(0.0)
+            if plm == 0 and sap == 0:
+                return "OK"
+            if plm == 0 and sap != 0:
+                return "PLM Missing"
 
-    plm_df["PLM_Consumption"] = pd.to_numeric(
-        plm_df["PLM_Consumption"], errors="coerce"
-    ).fillna(0.0)
+            diff_pct = abs(sap - plm) / plm
 
-    # -------------------------
-    # Merge Size-wise
-    # -------------------------
+            if diff_pct <= TOLERANCE:
+                return "Within Tolerance"
+            elif sap > plm:
+                return "SAP Higher"
+            else:
+                return "PLM Higher"
 
-    merge_keys = ["Material", "Vendor Ref"]
+        merged_df["Consumption_Status"] = merged_df.apply(compare_consumption, axis=1)
 
-    if "Garment Size" in sap_df.columns:
-        merge_keys.append("Garment Size")
+        merged_df["Consumption_Diff_%"] = merged_df.apply(
+            lambda x: round(((x["SAP_Consumption"] - x["PLM_Consumption"]) / x["PLM_Consumption"]) * 100, 2)
+            if x["PLM_Consumption"] not in [0, None] else None,
+            axis=1
+        )
 
-    merged_df = pd.merge(
-        sap_df,
-        plm_df,
-        on=merge_keys,
-        how="outer"
-    )
+        # ------------------------
+        # Fuzzy Similarity
+        # ------------------------
+        def smart_similarity(a, b):
+            a, b = str(a).strip(), str(b).strip()
+            if not a or not b:
+                return 0
+            return max(
+                fuzz.token_sort_ratio(a, b),
+                fuzz.token_set_ratio(a, b),
+                fuzz.partial_ratio(a, b)
+            )
 
-    merged_df["SAP_Consumption"] = merged_df["SAP_Consumption"].fillna(0.0)
-    merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].fillna(0.0)
+        merged_df["Vendor_Similarity"] = merged_df.apply(
+            lambda x: smart_similarity(x.get("Vendor Reference_SAP", ""), x.get("Vendor Reference_PLM", "")),
+            axis=1
+        )
 
-    # -------------------------
-    # Calculate Difference
-    # -------------------------
+        merged_df["Color_Similarity"] = merged_df.apply(
+            lambda x: smart_similarity(x.get("Color_SAP", ""), x.get("Color_PLM", "")),
+            axis=1
+        )
 
-    merged_df["Consumption_Difference"] = (
-        merged_df["SAP_Consumption"] - merged_df["PLM_Consumption"]
-    )
+        # ------------------------
+        # FILTER OPTION
+        # ------------------------
+        st.subheader("🔎 Filter Results")
+        show_mismatch_only = st.checkbox("Show only mismatches")
 
-    merged_df["Consumption_Diff_%"] = merged_df.apply(
-        lambda x: ((x["SAP_Consumption"] - x["PLM_Consumption"]) / x["PLM_Consumption"]) * 100
-        if x["PLM_Consumption"] != 0
-        else None,
-        axis=1
-    )
-
-    # -------------------------
-    # Tolerance Logic
-    # -------------------------
-
-    tolerance = tolerance_percent / 100
-
-    def compare_consumption(row):
-        sap = row["SAP_Consumption"]
-        plm = row["PLM_Consumption"]
-
-        if plm == 0 and sap == 0:
-            return "OK"
-        if plm == 0 and sap != 0:
-            return "PLM Missing"
-        if sap == 0 and plm != 0:
-            return "SAP Missing"
-
-        diff_pct = abs(sap - plm) / plm
-
-        if diff_pct <= tolerance:
-            return "Within Tolerance"
-        elif sap > plm:
-            return "SAP Higher"
+        if show_mismatch_only:
+            filtered_df = merged_df[
+                (merged_df["Consumption_Status"] != "Within Tolerance") |
+                (merged_df["VendorRef_Status"] != "Exact Match") |
+                (merged_df["Material_Match"] != "Matched in PLM")
+            ]
         else:
-            return "PLM Higher"
+            filtered_df = merged_df
 
-    merged_df["Consumption_Status"] = merged_df.apply(compare_consumption, axis=1)
+        # ------------------------
+        # Summary Metrics
+        # ------------------------
+        summary_df = merged_df.drop_duplicates(subset=["Material", "Color"])
+        st.subheader("📈 Summary")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total FG Materials", len(summary_df))
+        c2.metric("Within Tolerance", (summary_df["Consumption_Status"] == "Within Tolerance").sum())
+        c3.metric("Mismatches", (summary_df["Consumption_Status"] != "Within Tolerance").sum())
 
-    # Round for display only
-    merged_df["SAP_Consumption"] = merged_df["SAP_Consumption"].round(4)
-    merged_df["PLM_Consumption"] = merged_df["PLM_Consumption"].round(4)
-    merged_df["Consumption_Difference"] = merged_df["Consumption_Difference"].round(4)
-    merged_df["Consumption_Diff_%"] = merged_df["Consumption_Diff_%"].round(2)
-
-    # -------------------------
-    # Status Filter
-    # -------------------------
-
-    status_filter = st.selectbox(
-        "Filter by Status",
-        ["All"] + list(merged_df["Consumption_Status"].unique())
-    )
-
-    if status_filter != "All":
-        final_df = merged_df[merged_df["Consumption_Status"] == status_filter]
-    else:
-        final_df = merged_df
-
-    # -------------------------
-    # Output Columns
-    # -------------------------
-
-    display_cols = [
-        "Material",
-        "Vendor Ref",
-        "Garment Size",
-        "SAP_Consumption",
-        "PLM_Consumption",
-        "Consumption_Difference",
-        "Consumption_Diff_%",
-        "Consumption_Status"
-    ]
-
-    display_cols = [col for col in display_cols if col in final_df.columns]
-
-    final_df = final_df[display_cols]
-
-    st.dataframe(final_df, use_container_width=True)
-
-    # -------------------------
-    # Download Excel
-    # -------------------------
-
-    def to_excel(df):
+        # ------------------------
+        # Excel Export with Colors
+        # ------------------------
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Comparison")
-        return output.getvalue()
+            merged_df.to_excel(writer, sheet_name="Comparison_Report", index=False)
+            summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
-    st.download_button(
-        label="Download Comparison Report",
-        data=to_excel(final_df),
-        file_name="SAP_vs_PLM_Sizewise_Comparison.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+            workbook = writer.book
+            worksheet = writer.sheets["Comparison_Report"]
+            status_col_idx = merged_df.columns.get_loc("Consumption_Status")
+
+            format_red = workbook.add_format({'bg_color': '#FFC7CE'})
+            format_green = workbook.add_format({'bg_color': '#C6EFCE'})
+            format_orange = workbook.add_format({'bg_color': '#FFD580'})
+
+            worksheet.conditional_format(1, status_col_idx, len(merged_df), status_col_idx,
+                {'type': 'text', 'criteria': 'containing', 'value': 'SAP Higher', 'format': format_red})
+            worksheet.conditional_format(1, status_col_idx, len(merged_df), status_col_idx,
+                {'type': 'text', 'criteria': 'containing', 'value': 'PLM Higher', 'format': format_orange})
+            worksheet.conditional_format(1, status_col_idx, len(merged_df), status_col_idx,
+                {'type': 'text', 'criteria': 'containing', 'value': 'Within Tolerance', 'format': format_green})
+
+        output.seek(0)
+
+        st.download_button(
+            label="📥 Download Full Comparison Report",
+            data=output,
+            file_name="SAP_PLM_Comparison.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # ------------------------
+        # Preview Table
+        # ------------------------
+        st.subheader("🔍 Preview Results")
+        preview_cols = [
+            "Material", "Color",
+            "Vendor Reference_SAP", "Vendor Reference_PLM", "VendorRef_Status",
+            "SAP_Consumption", "PLM_Consumption",
+            "Consumption_Diff_%", "Consumption_Status",
+            "Vendor_Similarity", "Color_Similarity",
+            "Material_Match"
+        ]
+        available_cols = [c for c in preview_cols if c in filtered_df.columns]
+        st.dataframe(filtered_df[available_cols].head(200))
+
+    except Exception as e:
+        st.error(f"❌ Error while processing: {e}")
+
+else:
+    st.info("⬆️ Please upload both SAP and PLM files to start comparison.")
