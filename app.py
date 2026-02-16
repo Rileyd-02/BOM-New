@@ -2,23 +2,9 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-# ------------------------
-# Page Setup
-# ------------------------
 st.set_page_config(page_title="SAP vs PLM Consumption Validation", layout="wide")
 st.title("📊 SAP vs PLM Consumption Validation Tool")
 
-st.write("""
-This tool validates **SAP vs PLM consumption in decimals**.
-
-✔ SAP consumption is normalized using **Comp.Qty / Base Quantity**  
-✔ PLM consumption is used **as-is (decimals)**  
-✔ Match logic: **Material + Vendor Reference**  
-""")
-
-# ------------------------
-# File Upload
-# ------------------------
 sap_file = st.file_uploader("📤 Upload SAP Excel File", type=["xlsx"])
 plm_file = st.file_uploader("📤 Upload PLM Excel File", type=["xlsx"])
 
@@ -34,7 +20,16 @@ if sap_file and plm_file:
         plm_df.columns = plm_df.columns.str.strip()
 
         # ------------------------
-        # Rename Required Columns
+        # PREVIEW RAW COLUMNS
+        # ------------------------
+        st.subheader("🧾 SAP Columns")
+        st.write(list(sap_df.columns))
+
+        st.subheader("🧾 PLM Columns")
+        st.write(list(plm_df.columns))
+
+        # ------------------------
+        # Rename Columns
         # ------------------------
         sap_df.rename(columns={
             "Material": "Material",
@@ -50,39 +45,54 @@ if sap_file and plm_file:
         }, inplace=True)
 
         # ------------------------
-        # Validate Required Columns
+        # PREVIEW AFTER RENAME
         # ------------------------
-        required_sap = ["Material", "Vendor_Ref", "SAP_Comp_Qty", "Base_Qty"]
-        required_plm = ["Material", "Vendor_Ref", "PLM_Consumption"]
+        st.subheader("🔎 SAP Preview (After Rename)")
+        st.dataframe(sap_df[["Material", "Vendor_Ref", "SAP_Comp_Qty", "Base_Qty"]].head(10))
 
-        for col in required_sap:
-            if col not in sap_df.columns:
-                st.error(f"❌ Missing column in SAP file: {col}")
-                st.stop()
-
-        for col in required_plm:
-            if col not in plm_df.columns:
-                st.error(f"❌ Missing column in PLM file: {col}")
-                st.stop()
+        st.subheader("🔎 PLM Preview (After Rename)")
+        st.dataframe(plm_df[["Material", "Vendor_Ref", "PLM_Consumption"]].head(10))
 
         # ------------------------
-        # Clean & Normalize Join Keys (CRITICAL FIX)
+        # NORMALIZE JOIN KEYS (CRITICAL)
         # ------------------------
-        sap_df["Material"] = sap_df["Material"].astype(str).str.strip()
-        plm_df["Material"] = plm_df["Material"].astype(str).str.strip()
+
+        # Convert material to string & REMOVE leading zeros
+        sap_df["Material"] = (
+            sap_df["Material"]
+            .astype(str)
+            .str.strip()
+            .str.lstrip("0")
+        )
+
+        plm_df["Material"] = (
+            plm_df["Material"]
+            .astype(str)
+            .str.strip()
+            .str.lstrip("0")
+        )
 
         sap_df["Vendor_Ref"] = sap_df["Vendor_Ref"].astype(str).str.strip()
         plm_df["Vendor_Ref"] = plm_df["Vendor_Ref"].astype(str).str.strip()
 
         # ------------------------
-        # Convert Numeric Columns
+        # DEBUG JOIN KEYS
+        # ------------------------
+        st.subheader("🧩 SAP Join Keys")
+        st.dataframe(sap_df[["Material", "Vendor_Ref"]].drop_duplicates().head(10))
+
+        st.subheader("🧩 PLM Join Keys")
+        st.dataframe(plm_df[["Material", "Vendor_Ref"]].drop_duplicates().head(10))
+
+        # ------------------------
+        # Numeric Conversion
         # ------------------------
         sap_df["SAP_Comp_Qty"] = pd.to_numeric(sap_df["SAP_Comp_Qty"], errors="coerce")
         sap_df["Base_Qty"] = pd.to_numeric(sap_df["Base_Qty"], errors="coerce")
         plm_df["PLM_Consumption"] = pd.to_numeric(plm_df["PLM_Consumption"], errors="coerce")
 
         # ------------------------
-        # SAP Consumption Normalization (DECIMALS)
+        # SAP Consumption (DECIMAL)
         # ------------------------
         sap_df["SAP_Consumption"] = sap_df.apply(
             lambda x: round(x["SAP_Comp_Qty"] / x["Base_Qty"], 5)
@@ -92,7 +102,7 @@ if sap_file and plm_file:
         )
 
         # ------------------------
-        # Merge SAP & PLM
+        # MERGE
         # ------------------------
         merged_df = pd.merge(
             sap_df,
@@ -102,50 +112,25 @@ if sap_file and plm_file:
         )
 
         # ------------------------
-        # Consumption Comparison (DECIMAL SAFE)
+        # STATUS
         # ------------------------
-        TOLERANCE = 0.001  # ~0.1%
+        TOLERANCE = 0.001
 
-        def consumption_status(row):
-            sap = row["SAP_Consumption"]
-            plm = row["PLM_Consumption"]
-
-            if pd.isna(plm):
+        def status(row):
+            if pd.isna(row["PLM_Consumption"]):
                 return "Missing in PLM"
-            if pd.isna(sap):
-                return "Missing in SAP"
-
-            diff = abs(sap - plm)
-
-            if diff <= TOLERANCE:
+            if abs(row["SAP_Consumption"] - row["PLM_Consumption"]) <= TOLERANCE:
                 return "MATCH"
-            elif sap > plm:
-                return "SAP Higher"
-            else:
-                return "PLM Higher"
+            return "Mismatch"
 
-        merged_df["Consumption_Status"] = merged_df.apply(consumption_status, axis=1)
+        merged_df["Status"] = merged_df.apply(status, axis=1)
 
-        merged_df["Consumption_Difference"] = merged_df.apply(
-            lambda x: round(x["SAP_Consumption"] - x["PLM_Consumption"], 5)
-            if pd.notna(x["SAP_Consumption"]) and pd.notna(x["PLM_Consumption"])
-            else None,
-            axis=1
-        )
+        merged_df["Difference"] = merged_df["SAP_Consumption"] - merged_df["PLM_Consumption"]
 
         # ------------------------
-        # Summary
+        # FINAL PREVIEW
         # ------------------------
-        st.subheader("📈 Summary")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Records", len(merged_df))
-        c2.metric("Matches", (merged_df["Consumption_Status"] == "MATCH").sum())
-        c3.metric("Mismatches", (merged_df["Consumption_Status"] != "MATCH").sum())
-
-        # ------------------------
-        # Preview
-        # ------------------------
-        st.subheader("🔍 Preview Results")
+        st.subheader("✅ Final Comparison Preview")
         st.dataframe(
             merged_df[
                 [
@@ -155,52 +140,30 @@ if sap_file and plm_file:
                     "Base_Qty",
                     "SAP_Consumption",
                     "PLM_Consumption",
-                    "Consumption_Difference",
-                    "Consumption_Status"
+                    "Difference",
+                    "Status"
                 ]
             ].head(200)
         )
 
         # ------------------------
-        # Excel Export
+        # EXPORT
         # ------------------------
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            merged_df.to_excel(writer, sheet_name="Consumption_Comparison", index=False)
-
-            workbook = writer.book
-            worksheet = writer.sheets["Consumption_Comparison"]
-
-            status_col = merged_df.columns.get_loc("Consumption_Status")
-
-            green = workbook.add_format({'bg_color': '#C6EFCE'})
-            red = workbook.add_format({'bg_color': '#FFC7CE'})
-            orange = workbook.add_format({'bg_color': '#FFD580'})
-
-            worksheet.conditional_format(
-                1, status_col, len(merged_df), status_col,
-                {'type': 'text', 'criteria': 'containing', 'value': 'MATCH', 'format': green}
-            )
-            worksheet.conditional_format(
-                1, status_col, len(merged_df), status_col,
-                {'type': 'text', 'criteria': 'containing', 'value': 'Higher', 'format': red}
-            )
-            worksheet.conditional_format(
-                1, status_col, len(merged_df), status_col,
-                {'type': 'text', 'criteria': 'containing', 'value': 'Missing', 'format': orange}
-            )
+            merged_df.to_excel(writer, index=False, sheet_name="Comparison")
 
         output.seek(0)
 
         st.download_button(
-            label="📥 Download Comparison Output",
+            "📥 Download Output",
             data=output,
             file_name="SAP_PLM_Consumption_Comparison.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except Exception as e:
-        st.error(f"❌ Error while processing: {e}")
+        st.error(f"❌ Error: {e}")
 
 else:
-    st.info("⬆️ Please upload both SAP and PLM Excel files.")
+    st.info("⬆️ Upload both SAP and PLM files to begin.")
