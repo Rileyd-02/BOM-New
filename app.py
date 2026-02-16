@@ -39,7 +39,7 @@ if sap_file and plm_file:
         sap_df = sap_df.rename(columns={
             "Material": "Material",
             "Vendor Reference": "Vendor_Ref",
-            "Comp.Qty": "SAP_Comp_Qty",
+            "Comp.Qty.": "SAP_Comp_Qty",
             "Base quantity": "Base_Qty"
         })
 
@@ -163,3 +163,4 @@ if sap_file and plm_file:
 
 else:
     st.info("⬆️ Upload both SAP and PLM files to begin.")
+
